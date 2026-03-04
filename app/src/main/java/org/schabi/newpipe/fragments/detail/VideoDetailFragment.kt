@@ -175,13 +175,14 @@ class VideoDetailFragment :
 
     private val preferenceChangeListener =
         OnSharedPreferenceChangeListener { sharedPreferences, key ->
-            if (getString(R.string.show_comments_key) == key) {
+            val context = context ?: return@OnSharedPreferenceChangeListener
+            if (context.getString(R.string.show_comments_key) == key) {
                 showComments = sharedPreferences.getBoolean(key, true)
                 tabSettingsChanged = true
-            } else if (getString(R.string.show_next_video_key) == key) {
+            } else if (context.getString(R.string.show_next_video_key) == key) {
                 showRelatedItems = sharedPreferences.getBoolean(key, true)
                 tabSettingsChanged = true
-            } else if (getString(R.string.show_description_key) == key) {
+            } else if (context.getString(R.string.show_description_key) == key) {
                 showDescription = sharedPreferences.getBoolean(key, true)
                 tabSettingsChanged = true
             }
