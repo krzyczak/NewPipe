@@ -82,12 +82,7 @@ jobs:
               --base refactor \
               --head feat/nostr-sync \
               --title "Rebase conflict: feat/nostr-sync onto refactor" \
-              --body "$(cat <<'EOF'
-Automated nightly rebase detected conflicts while rebasing `feat/nostr-sync` onto `TeamNewPipe/refactor`.
-
-`refactor` in this fork is kept synced to `TeamNewPipe/refactor` by workflow automation.
-EOF
-)"
+              --body $'Automated nightly rebase detected conflicts while rebasing `feat/nostr-sync` onto `TeamNewPipe/refactor`.\n\n`refactor` in this fork is kept synced to `TeamNewPipe/refactor` by workflow automation.'
             PR_NUMBER="$(gh pr list \
               --base refactor \
               --head feat/nostr-sync \
@@ -99,12 +94,7 @@ EOF
           HAS_MARKER_COMMENT="$(gh pr view "$PR_NUMBER" --json comments --jq '[.comments[] | select(.body | contains("<!-- rebase-conflict-bot -->"))] | length')"
 
           if [ "$HAS_MARKER_COMMENT" -eq 0 ]; then
-            gh pr comment "$PR_NUMBER" --body "$(cat <<'EOF'
-<!-- rebase-conflict-bot -->
-@copilot Please resolve the current merge conflicts so `feat/nostr-sync` can be rebased cleanly onto `refactor` (which mirrors `TeamNewPipe/refactor`).
-Preserve existing `feat/nostr-sync` functionality and keep the project buildable.
-EOF
-)"
+            gh pr comment "$PR_NUMBER" --body $'<!-- rebase-conflict-bot -->\n@copilot Please resolve the current merge conflicts so `feat/nostr-sync` can be rebased cleanly onto `refactor` (which mirrors `TeamNewPipe/refactor`).\nPreserve existing `feat/nostr-sync` functionality and keep the project buildable.'
           fi
 
           {
