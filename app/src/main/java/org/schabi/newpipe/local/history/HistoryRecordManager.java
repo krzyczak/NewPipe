@@ -22,6 +22,7 @@ import static org.schabi.newpipe.util.ExtractorHelper.getStreamInfo;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.collection.LongLongPair;
@@ -160,8 +161,18 @@ public class HistoryRecordManager {
 
     public Completable deleteStreamHistoryAndState(final long streamId) {
         return Completable.fromAction(() -> {
+            final StreamEntity streamEntity = streamTable.getStreamByIdBlocking(streamId);
             streamStateTable.deleteState(streamId);
             streamHistoryTable.deleteStreamHistory(streamId);
+            if (streamEntity != null && !TextUtils.isEmpty(streamEntity.getUrl())) {
+                NostrSyncManager.recordHistoryDeletion(
+                        appContext,
+                        streamEntity.getServiceId(),
+                        streamEntity.getUrl()
+                );
+            } else {
+                NostrSyncManager.requestSync(appContext);
+            }
         }).subscribeOn(Schedulers.io());
     }
 

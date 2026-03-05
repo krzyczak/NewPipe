@@ -70,6 +70,8 @@ public final class NostrSyncManager {
     private static final String PREF_NOSTR_RELAYS = "nostr_relays";
     private static final String PREF_NOSTR_ENABLED_RELAYS = "nostr_enabled_relays";
     private static final String PREF_NOSTR_SYNC_DEVICE_ID = "nostr_sync_device_id";
+    private static final String PREF_NOSTR_HISTORY_DELETIONS =
+            "nostr_sync_history_deletions";
     private static final String PREF_NOSTR_LAST_CONNECTED_RELAYS =
             "nostr_sync_last_connected_relays";
     private static final String PREF_NOSTR_LAST_TOTAL_RELAYS = "nostr_sync_last_total_relays";
@@ -102,8 +104,11 @@ public final class NostrSyncManager {
     private static final String NIP55_TYPE = "type";
     private static final String NIP55_TYPE_GET_PUBLIC_KEY = "get_public_key";
     private static final String CATEGORY_WATCH_HISTORY = "watch_history";
+    private static final String CATEGORY_WATCH_HISTORY_DELETIONS = "watch_history_deletions";
     private static final String CATEGORY_SUBSCRIPTIONS = "subscriptions";
     private static final String D_TAG_HISTORY_PREFIX = "newpipe-sync-watch-history:";
+    private static final String D_TAG_HISTORY_DELETIONS_PREFIX =
+            "newpipe-sync-watch-history-deletions:";
     private static final String D_TAG_SUBSCRIPTIONS_PREFIX = "newpipe-sync-subscriptions:";
     private static final int KIND_PROFILE_METADATA = 0;
     private static final int KIND_APP_DATA = 30078;
@@ -111,6 +116,7 @@ public final class NostrSyncManager {
     private static final int RELAY_EOSE_TIMEOUT_MS = 7000;
     private static final int RELAY_PUBLISH_TIMEOUT_MS = 4500;
     private static final int MAX_HISTORY_RECORDS_PER_SNAPSHOT = 150;
+    private static final int MAX_HISTORY_DELETIONS_PER_SNAPSHOT = 500;
     private static final int MAX_SUBSCRIPTIONS_PER_SNAPSHOT = 500;
     private static final int MAX_CATEGORY_DATA_BYTES = 28 * 1024;
 
@@ -143,7 +149,6 @@ public final class NostrSyncManager {
         if (!SYNC_RUNNING.compareAndSet(false, true)) {
             return;
         }
-
         Completable.fromAction(() -> syncBlocking(context.getApplicationContext()))
                 .subscribeOn(Schedulers.io())
                 .doFinally(() -> SYNC_RUNNING.set(false))
@@ -152,6 +157,35 @@ public final class NostrSyncManager {
                         },
                         throwable -> Log.w(TAG, "Sync failed", throwable)
                 );
+    }
+
+    public static void recordHistoryDeletion(@NonNull final Context context,
+                                             final int serviceId,
+                                             @Nullable final String url) {
+        final String normalizedUrl = trimToNull(url);
+        if (TextUtils.isEmpty(normalizedUrl)) {
+            return;
+        }
+        final Context appContext = context.getApplicationContext();
+        final SharedPreferences preferences =
+                PreferenceManager.getDefaultSharedPreferences(appContext);
+        final Map<String, Long> localDeletions =
+                NostrHistoryDeletionHelper.readFromPreferences(
+                        preferences,
+                        PREF_NOSTR_HISTORY_DELETIONS
+                );
+        final String key = composeKey(serviceId, normalizedUrl);
+        NostrHistoryDeletionHelper.mergeTimestamp(
+                localDeletions,
+                key,
+                Instant.now().getEpochSecond()
+        );
+        NostrHistoryDeletionHelper.writeToPreferences(
+                preferences,
+                PREF_NOSTR_HISTORY_DELETIONS,
+                localDeletions
+        );
+        requestSync(appContext);
     }
 
     public static void publishProfileMetadata(@NonNull final Context context,
@@ -171,7 +205,6 @@ public final class NostrSyncManager {
                 && TextUtils.isEmpty(normalizedPictureUrl)) {
             return;
         }
-
         Completable.fromAction(() -> publishProfileMetadataBlocking(
                         context.getApplicationContext(),
                         normalizedNsec,
@@ -244,8 +277,21 @@ public final class NostrSyncManager {
 
         if (syncHistory) {
             final Map<String, HistoryRecord> localHistory = readLocalHistory(database);
+            final Map<String, Long> localHistoryDeletions =
+                    NostrHistoryDeletionHelper.readFromPreferences(
+                            preferences,
+                            PREF_NOSTR_HISTORY_DELETIONS
+                    );
             final Map<String, HistoryRecord> remoteHistory =
                     readHistoryFromEvents(
+                            relayEvents,
+                            context,
+                            localNsec,
+                            signerPackage,
+                            pubKeyHex
+                    );
+            final Map<String, Long> remoteHistoryDeletions =
+                    readHistoryDeletionsFromEvents(
                             relayEvents,
                             context,
                             localNsec,
@@ -257,11 +303,30 @@ public final class NostrSyncManager {
                             remoteHistory,
                             localHistory
                     );
+            final Map<String, Long> mergedHistoryDeletions =
+                    NostrHistoryDeletionHelper.mergeMaps(
+                            remoteHistoryDeletions,
+                            localHistoryDeletions
+                    );
+            applyHistoryDeletions(mergedHistory, mergedHistoryDeletions);
+            NostrHistoryDeletionHelper.applyToDatabase(database, mergedHistoryDeletions);
             Log.d(TAG, "History merge local=" + localHistory.size()
                     + " remote=" + remoteHistory.size()
-                    + " merged=" + mergedHistory.size());
+                    + " merged=" + mergedHistory.size()
+                    + " deletions=" + mergedHistoryDeletions.size());
             applyHistoryToDatabase(database, mergedHistory);
-            final int acceptedRelays = publishCategorySnapshot(
+            final Map<String, HistoryRecord> canonicalHistory = readLocalHistory(database);
+            final Map<String, Long> canonicalHistoryAccess = new HashMap<>();
+            for (final Map.Entry<String, HistoryRecord> entry : canonicalHistory.entrySet()) {
+                canonicalHistoryAccess.put(entry.getKey(), entry.getValue().accessTs);
+            }
+            NostrHistoryDeletionHelper.prune(mergedHistoryDeletions, canonicalHistoryAccess);
+            NostrHistoryDeletionHelper.writeToPreferences(
+                    preferences,
+                    PREF_NOSTR_HISTORY_DELETIONS,
+                    mergedHistoryDeletions
+            );
+            final int acceptedRelaysHistory = publishCategorySnapshot(
                     context,
                     relays,
                     localNsec,
@@ -269,9 +334,27 @@ public final class NostrSyncManager {
                     pubKeyHex,
                     CATEGORY_WATCH_HISTORY,
                     D_TAG_HISTORY_PREFIX + deviceId,
-                    historyToJson(readLocalHistory(database))
+                    historyToJson(canonicalHistory)
             );
-            updateRelayStatus(preferences, acceptedRelays, relays.size());
+            final int acceptedRelaysDeletions = publishCategorySnapshot(
+                    context,
+                    relays,
+                    localNsec,
+                    signerPackage,
+                    pubKeyHex,
+                    CATEGORY_WATCH_HISTORY_DELETIONS,
+                    D_TAG_HISTORY_DELETIONS_PREFIX + deviceId,
+                    NostrHistoryDeletionHelper.toJson(
+                            mergedHistoryDeletions,
+                            MAX_HISTORY_DELETIONS_PER_SNAPSHOT,
+                            MAX_CATEGORY_DATA_BYTES
+                    )
+            );
+            updateRelayStatus(
+                    preferences,
+                    Math.max(acceptedRelaysHistory, acceptedRelaysDeletions),
+                    relays.size()
+            );
         }
 
         if (syncSubscriptions) {
@@ -662,6 +745,61 @@ public final class NostrSyncManager {
     }
 
     @NonNull
+    private static Map<String, Long> readHistoryDeletionsFromEvents(
+            @NonNull final List<JSONObject> events,
+            @NonNull final Context context,
+            @Nullable final String nsec,
+            @Nullable final String signerPackage,
+            @NonNull final String currentUserPubKeyHex) {
+        final Map<String, Long> merged = new HashMap<>();
+        int decryptedPayloads = 0;
+        for (final JSONObject event : events) {
+            if (event.optInt("kind", -1) != KIND_APP_DATA) {
+                continue;
+            }
+            final String dTag = getDTag(event);
+            if (!dTag.startsWith(D_TAG_HISTORY_DELETIONS_PREFIX)) {
+                continue;
+            }
+
+            final JSONObject payload = decryptPayload(
+                    event,
+                    context,
+                    nsec,
+                    signerPackage,
+                    currentUserPubKeyHex
+            );
+            if (payload == null || !CATEGORY_WATCH_HISTORY_DELETIONS.equals(
+                    payload.optString("category", "")
+            )) {
+                continue;
+            }
+            decryptedPayloads++;
+
+            final JSONObject data = payload.optJSONObject("data");
+            if (data == null) {
+                continue;
+            }
+            final Iterator<String> keyIterator = data.keys();
+            while (keyIterator.hasNext()) {
+                final String key = keyIterator.next();
+                if (TextUtils.isEmpty(key)) {
+                    continue;
+                }
+                final Object raw = data.opt(key);
+                final long deletionTs = NostrHistoryDeletionHelper.parseTimestamp(raw);
+                if (deletionTs <= 0) {
+                    continue;
+                }
+                NostrHistoryDeletionHelper.mergeTimestamp(merged, key, deletionTs);
+            }
+        }
+        Log.d(TAG, "Decoded history deletion payloads=" + decryptedPayloads
+                + " tombstones=" + merged.size());
+        return merged;
+    }
+
+    @NonNull
     private static Map<String, SubscriptionRecord> readSubscriptionsFromEvents(
             @NonNull final List<JSONObject> events,
             @NonNull final Context context,
@@ -964,6 +1102,24 @@ public final class NostrSyncManager {
             existing.subscriberCount = Math.max(existing.subscriberCount, incoming.subscriberCount);
         }
         existing.mergeGroupsFrom(incoming);
+    }
+
+    private static void applyHistoryDeletions(@NonNull final Map<String, HistoryRecord> history,
+                                              @NonNull final Map<String, Long> deletions) {
+        if (history.isEmpty() || deletions.isEmpty()) {
+            return;
+        }
+        final Iterator<Map.Entry<String, HistoryRecord>> iterator = history.entrySet().iterator();
+        while (iterator.hasNext()) {
+            final Map.Entry<String, HistoryRecord> entry = iterator.next();
+            final Long deletionTs = deletions.get(entry.getKey());
+            if (deletionTs == null || deletionTs <= 0) {
+                continue;
+            }
+            if (entry.getValue().accessTs <= deletionTs) {
+                iterator.remove();
+            }
+        }
     }
 
     private static void applyHistoryToDatabase(@NonNull final AppDatabase database,
@@ -1828,30 +1984,6 @@ public final class NostrSyncManager {
                     && group.iconId != FeedGroupIcon.ALL.getId()) {
                 existing.iconId = group.iconId;
             }
-        }
-    }
-
-    private static final class GroupRecord {
-        final String name;
-        int iconId;
-
-        GroupRecord(@NonNull final String name, final int iconId) {
-            this.name = name;
-            this.iconId = iconId;
-        }
-
-        @NonNull
-        static GroupRecord fromJson(@NonNull final JSONObject json) {
-            final String name = json.optString("name", "");
-            final int iconId = json.optInt("icon_id", FeedGroupIcon.ALL.getId());
-            return new GroupRecord(name, iconId);
-        }
-
-        @NonNull
-        JSONObject toJson() throws JSONException {
-            return new JSONObject()
-                    .put("name", name)
-                    .put("icon_id", iconId);
         }
     }
 

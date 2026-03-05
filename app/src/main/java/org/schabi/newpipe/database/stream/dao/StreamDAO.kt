@@ -30,6 +30,9 @@ abstract class StreamDAO : BasicDAO<StreamEntity> {
     @Query("SELECT * FROM streams WHERE url = :url AND service_id = :serviceId")
     abstract fun getStream(serviceId: Long, url: String): Maybe<StreamEntity>
 
+    @Query("SELECT * FROM streams WHERE uid = :streamId LIMIT 1")
+    abstract fun getStreamByIdBlocking(streamId: Long): StreamEntity?
+
     @Query("UPDATE streams SET uploader_url = :uploaderUrl WHERE url = :url AND service_id = :serviceId")
     abstract fun setUploaderUrl(serviceId: Long, url: String, uploaderUrl: String): Completable
 
