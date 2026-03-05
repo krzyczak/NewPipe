@@ -113,17 +113,27 @@ class SubscriptionManager(context: Context) {
         return Completable.fromCallable { subscriptionTable.deleteSubscription(serviceId, url) }
             .subscribeOn(Schedulers.io())
             .observeOn(AndroidSchedulers.mainThread())
-            .doOnComplete { NostrSyncManager.requestSync(appContext) }
+            .doOnComplete {
+                NostrSyncManager.recordSubscriptionDeletion(appContext, serviceId, url)
+            }
     }
 
     fun insertSubscription(subscriptionEntity: SubscriptionEntity) {
         subscriptionTable.insert(subscriptionEntity)
-        NostrSyncManager.requestSync(appContext)
+        NostrSyncManager.recordSubscriptionTouch(
+            appContext,
+            subscriptionEntity.serviceId,
+            subscriptionEntity.url
+        )
     }
 
     fun deleteSubscription(subscriptionEntity: SubscriptionEntity) {
         subscriptionTable.delete(subscriptionEntity)
-        NostrSyncManager.requestSync(appContext)
+        NostrSyncManager.recordSubscriptionDeletion(
+            appContext,
+            subscriptionEntity.serviceId,
+            subscriptionEntity.url
+        )
     }
 
     /**

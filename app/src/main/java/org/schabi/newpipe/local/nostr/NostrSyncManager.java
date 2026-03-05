@@ -22,7 +22,6 @@ import org.schabi.newpipe.database.history.model.StreamHistoryEntity;
 import org.schabi.newpipe.database.history.model.StreamHistoryEntry;
 import org.schabi.newpipe.database.stream.model.StreamEntity;
 import org.schabi.newpipe.database.stream.model.StreamStateEntity;
-import org.schabi.newpipe.database.subscription.NotificationMode;
 import org.schabi.newpipe.database.subscription.SubscriptionEntity;
 import org.schabi.newpipe.extractor.stream.StreamType;
 import org.schabi.newpipe.local.subscription.FeedGroupIcon;
@@ -70,8 +69,10 @@ public final class NostrSyncManager {
     private static final String PREF_NOSTR_RELAYS = "nostr_relays";
     private static final String PREF_NOSTR_ENABLED_RELAYS = "nostr_enabled_relays";
     private static final String PREF_NOSTR_SYNC_DEVICE_ID = "nostr_sync_device_id";
-    private static final String PREF_NOSTR_HISTORY_DELETIONS =
-            "nostr_sync_history_deletions";
+    private static final String PREF_NOSTR_HISTORY_DELETIONS = "nostr_sync_history_deletions";
+    private static final String PREF_NOSTR_SUBSCRIPTION_DELETIONS =
+            "nostr_sync_subscription_deletions";
+    private static final String PREF_NOSTR_SUBSCRIPTION_CLOCKS = "nostr_sync_subscription_clocks";
     private static final String PREF_NOSTR_LAST_CONNECTED_RELAYS =
             "nostr_sync_last_connected_relays";
     private static final String PREF_NOSTR_LAST_TOTAL_RELAYS = "nostr_sync_last_total_relays";
@@ -106,10 +107,13 @@ public final class NostrSyncManager {
     private static final String CATEGORY_WATCH_HISTORY = "watch_history";
     private static final String CATEGORY_WATCH_HISTORY_DELETIONS = "watch_history_deletions";
     private static final String CATEGORY_SUBSCRIPTIONS = "subscriptions";
+    private static final String CATEGORY_SUBSCRIPTIONS_DELETIONS = "subscriptions_deletions";
     private static final String D_TAG_HISTORY_PREFIX = "newpipe-sync-watch-history:";
     private static final String D_TAG_HISTORY_DELETIONS_PREFIX =
             "newpipe-sync-watch-history-deletions:";
     private static final String D_TAG_SUBSCRIPTIONS_PREFIX = "newpipe-sync-subscriptions:";
+    private static final String D_TAG_SUBSCRIPTIONS_DELETIONS_PREFIX =
+            "newpipe-sync-subscriptions-deletions:";
     private static final int KIND_PROFILE_METADATA = 0;
     private static final int KIND_APP_DATA = 30078;
     private static final int RELAY_CONNECT_TIMEOUT_MS = 6000;
@@ -118,6 +122,7 @@ public final class NostrSyncManager {
     private static final int MAX_HISTORY_RECORDS_PER_SNAPSHOT = 150;
     private static final int MAX_HISTORY_DELETIONS_PER_SNAPSHOT = 500;
     private static final int MAX_SUBSCRIPTIONS_PER_SNAPSHOT = 500;
+    private static final int MAX_SUBSCRIPTION_DELETIONS_PER_SNAPSHOT = 500;
     private static final int MAX_CATEGORY_DATA_BYTES = 28 * 1024;
 
     private static final AtomicBoolean SYNC_RUNNING = new AtomicBoolean(false);
@@ -183,6 +188,57 @@ public final class NostrSyncManager {
         NostrHistoryDeletionHelper.writeToPreferences(
                 preferences,
                 PREF_NOSTR_HISTORY_DELETIONS,
+                localDeletions
+        );
+        requestSync(appContext);
+    }
+
+    public static void recordSubscriptionDeletion(@NonNull final Context context,
+                                                  final int serviceId,
+                                                  @Nullable final String url) {
+        recordSubscriptionStateChange(context, serviceId, url, true); }
+
+    public static void recordSubscriptionTouch(@NonNull final Context context,
+                                               final int serviceId,
+                                               @Nullable final String url) {
+        recordSubscriptionStateChange(context, serviceId, url, false); }
+
+    private static void recordSubscriptionStateChange(@NonNull final Context context,
+                                                      final int serviceId,
+                                                      @Nullable final String url,
+                                                      final boolean deleted) {
+        final String normalizedUrl = trimToNull(url);
+        if (TextUtils.isEmpty(normalizedUrl)) {
+            return;
+        }
+        final Context appContext = context.getApplicationContext();
+        final SharedPreferences preferences =
+                PreferenceManager.getDefaultSharedPreferences(appContext);
+        final String key = composeKey(serviceId, normalizedUrl);
+        final long nowTs = Instant.now().getEpochSecond();
+        final Map<String, Long> localClocks = NostrHistoryDeletionHelper.readFromPreferences(
+                preferences,
+                PREF_NOSTR_SUBSCRIPTION_CLOCKS
+        );
+        final Map<String, Long> localDeletions = NostrHistoryDeletionHelper.readFromPreferences(
+                preferences,
+                PREF_NOSTR_SUBSCRIPTION_DELETIONS
+        );
+        if (deleted) {
+            localClocks.remove(key);
+            NostrHistoryDeletionHelper.mergeTimestamp(localDeletions, key, nowTs);
+        } else {
+            NostrHistoryDeletionHelper.mergeTimestamp(localClocks, key, nowTs);
+            localDeletions.remove(key);
+        }
+        NostrHistoryDeletionHelper.writeToPreferences(
+                preferences,
+                PREF_NOSTR_SUBSCRIPTION_CLOCKS,
+                localClocks
+        );
+        NostrHistoryDeletionHelper.writeToPreferences(
+                preferences,
+                PREF_NOSTR_SUBSCRIPTION_DELETIONS,
                 localDeletions
         );
         requestSync(appContext);
@@ -256,7 +312,6 @@ public final class NostrSyncManager {
             Log.w(TAG, "Skipping sync: invalid nostr identity", e);
             return;
         }
-
         final String signerPackage = localNsec == null
                 ? resolveSignerPackage(context, preferences)
                 : null;
@@ -272,7 +327,6 @@ public final class NostrSyncManager {
                 + " history=" + syncHistory + " subscriptions=" + syncSubscriptions);
         final List<JSONObject> relayEvents = fetchSyncEvents(relays, pubKeyHex);
         Log.d(TAG, "Fetched " + relayEvents.size() + " candidate events");
-
         final AppDatabase database = NewPipeDatabase.getInstance(context);
 
         if (syncHistory) {
@@ -291,12 +345,14 @@ public final class NostrSyncManager {
                             pubKeyHex
                     );
             final Map<String, Long> remoteHistoryDeletions =
-                    readHistoryDeletionsFromEvents(
+                    readDeletionMapFromEvents(
                             relayEvents,
                             context,
                             localNsec,
                             signerPackage,
-                            pubKeyHex
+                            pubKeyHex,
+                            D_TAG_HISTORY_DELETIONS_PREFIX,
+                            CATEGORY_WATCH_HISTORY_DELETIONS
                     );
             final Map<String, HistoryRecord> mergedHistory =
                     mergeHistoryMaps(
@@ -358,8 +414,23 @@ public final class NostrSyncManager {
         }
 
         if (syncSubscriptions) {
+            final long nowTs = Instant.now().getEpochSecond();
             final Map<String, SubscriptionRecord> localSubscriptions =
                     readLocalSubscriptions(database);
+            final Map<String, Long> localSubscriptionClocks =
+                    NostrHistoryDeletionHelper.readFromPreferences(
+                            preferences,
+                            PREF_NOSTR_SUBSCRIPTION_CLOCKS
+                    );
+            NostrSubscriptionDeletionHelper.alignLocalClocks(
+                    localSubscriptions,
+                    localSubscriptionClocks
+            );
+            final Map<String, Long> localSubscriptionDeletions =
+                    NostrHistoryDeletionHelper.readFromPreferences(
+                            preferences,
+                            PREF_NOSTR_SUBSCRIPTION_DELETIONS
+                    );
             final Map<String, SubscriptionRecord> remoteSubscriptions =
                     readSubscriptionsFromEvents(
                             relayEvents,
@@ -368,16 +439,64 @@ public final class NostrSyncManager {
                             signerPackage,
                             pubKeyHex
                     );
+            final Map<String, Long> remoteSubscriptionDeletions =
+                    readDeletionMapFromEvents(
+                            relayEvents,
+                            context,
+                            localNsec,
+                            signerPackage,
+                            pubKeyHex,
+                            D_TAG_SUBSCRIPTIONS_DELETIONS_PREFIX,
+                            CATEGORY_SUBSCRIPTIONS_DELETIONS
+                    );
             final Map<String, SubscriptionRecord> mergedSubscriptions =
                     mergeSubscriptionMaps(
                             remoteSubscriptions,
                             localSubscriptions
                     );
+            final Map<String, Long> mergedSubscriptionDeletions =
+                    NostrHistoryDeletionHelper.mergeMaps(
+                            remoteSubscriptionDeletions,
+                            localSubscriptionDeletions
+                    );
+            NostrSubscriptionDeletionHelper.applyToRecords(
+                    mergedSubscriptions,
+                    mergedSubscriptionDeletions
+            );
+            NostrSubscriptionDeletionHelper.applyToDatabase(
+                    database,
+                    mergedSubscriptionDeletions,
+                    localSubscriptionClocks
+            );
             Log.d(TAG, "Subscription merge local=" + localSubscriptions.size()
                     + " remote=" + remoteSubscriptions.size()
-                    + " merged=" + mergedSubscriptions.size());
+                    + " merged=" + mergedSubscriptions.size()
+                    + " deletions=" + mergedSubscriptionDeletions.size());
             applySubscriptionsToDatabase(database, mergedSubscriptions);
-            final int acceptedRelays = publishCategorySnapshot(
+            final Map<String, SubscriptionRecord> canonicalSubscriptions =
+                    readLocalSubscriptions(database);
+            final Map<String, Long> canonicalSubscriptionClocks =
+                    NostrSubscriptionDeletionHelper.buildCanonicalClocks(
+                            canonicalSubscriptions,
+                            localSubscriptionClocks,
+                            mergedSubscriptions,
+                            nowTs
+                    );
+            NostrHistoryDeletionHelper.prune(
+                    mergedSubscriptionDeletions,
+                    canonicalSubscriptionClocks
+            );
+            NostrHistoryDeletionHelper.writeToPreferences(
+                    preferences,
+                    PREF_NOSTR_SUBSCRIPTION_CLOCKS,
+                    canonicalSubscriptionClocks
+            );
+            NostrHistoryDeletionHelper.writeToPreferences(
+                    preferences,
+                    PREF_NOSTR_SUBSCRIPTION_DELETIONS,
+                    mergedSubscriptionDeletions
+            );
+            final int acceptedRelaysSubscriptions = publishCategorySnapshot(
                     context,
                     relays,
                     localNsec,
@@ -385,9 +504,27 @@ public final class NostrSyncManager {
                     pubKeyHex,
                     CATEGORY_SUBSCRIPTIONS,
                     D_TAG_SUBSCRIPTIONS_PREFIX + deviceId,
-                    subscriptionsToJson(readLocalSubscriptions(database))
+                    subscriptionsToJson(canonicalSubscriptions)
             );
-            updateRelayStatus(preferences, acceptedRelays, relays.size());
+            final int acceptedRelaysSubscriptionDeletions = publishCategorySnapshot(
+                    context,
+                    relays,
+                    localNsec,
+                    signerPackage,
+                    pubKeyHex,
+                    CATEGORY_SUBSCRIPTIONS_DELETIONS,
+                    D_TAG_SUBSCRIPTIONS_DELETIONS_PREFIX + deviceId,
+                    NostrHistoryDeletionHelper.toJson(
+                            mergedSubscriptionDeletions,
+                            MAX_SUBSCRIPTION_DELETIONS_PER_SNAPSHOT,
+                            MAX_CATEGORY_DATA_BYTES
+                    )
+            );
+            updateRelayStatus(
+                    preferences,
+                    Math.max(acceptedRelaysSubscriptions, acceptedRelaysSubscriptionDeletions),
+                    relays.size()
+            );
         }
     }
 
@@ -745,12 +882,14 @@ public final class NostrSyncManager {
     }
 
     @NonNull
-    private static Map<String, Long> readHistoryDeletionsFromEvents(
+    private static Map<String, Long> readDeletionMapFromEvents(
             @NonNull final List<JSONObject> events,
             @NonNull final Context context,
             @Nullable final String nsec,
             @Nullable final String signerPackage,
-            @NonNull final String currentUserPubKeyHex) {
+            @NonNull final String currentUserPubKeyHex,
+            @NonNull final String dTagPrefix,
+            @NonNull final String category) {
         final Map<String, Long> merged = new HashMap<>();
         int decryptedPayloads = 0;
         for (final JSONObject event : events) {
@@ -758,7 +897,7 @@ public final class NostrSyncManager {
                 continue;
             }
             final String dTag = getDTag(event);
-            if (!dTag.startsWith(D_TAG_HISTORY_DELETIONS_PREFIX)) {
+            if (!dTag.startsWith(dTagPrefix)) {
                 continue;
             }
 
@@ -769,7 +908,7 @@ public final class NostrSyncManager {
                     signerPackage,
                     currentUserPubKeyHex
             );
-            if (payload == null || !CATEGORY_WATCH_HISTORY_DELETIONS.equals(
+            if (payload == null || !category.equals(
                     payload.optString("category", "")
             )) {
                 continue;
@@ -794,7 +933,8 @@ public final class NostrSyncManager {
                 NostrHistoryDeletionHelper.mergeTimestamp(merged, key, deletionTs);
             }
         }
-        Log.d(TAG, "Decoded history deletion payloads=" + decryptedPayloads
+        Log.d(TAG, "Decoded deletion payloads category=" + category
+                + " count=" + decryptedPayloads
                 + " tombstones=" + merged.size());
         return merged;
     }
@@ -830,6 +970,10 @@ public final class NostrSyncManager {
                 continue;
             }
             decryptedPayloads++;
+            final long payloadUpdatedTs = Math.max(
+                    payload.optLong("updated_at", 0),
+                    event.optLong("created_at", 0)
+            );
 
             final JSONObject data = payload.optJSONObject("data");
             if (data == null) {
@@ -842,7 +986,8 @@ public final class NostrSyncManager {
                 if (item == null) {
                     continue;
                 }
-                final SubscriptionRecord parsed = SubscriptionRecord.fromJson(item);
+                final SubscriptionRecord parsed =
+                        SubscriptionRecord.fromJson(item, payloadUpdatedTs);
                 if (parsed == null) {
                     continue;
                 }
@@ -1093,6 +1238,21 @@ public final class NostrSyncManager {
             sink.put(key, incoming);
             return;
         }
+
+        final boolean incomingIsNewer = incoming.updatedTs > existing.updatedTs;
+        if (incomingIsNewer) {
+            existing.updatedTs = incoming.updatedTs;
+            existing.name = nonEmpty(incoming.name, existing.name);
+            existing.avatarUrl = nonEmpty(incoming.avatarUrl, existing.avatarUrl);
+            existing.description = nonEmpty(incoming.description, existing.description);
+            if (incoming.subscriberCount != null) {
+                existing.subscriberCount = incoming.subscriberCount;
+            }
+            existing.mergeGroupsFrom(incoming);
+            return;
+        }
+
+        existing.updatedTs = Math.max(existing.updatedTs, incoming.updatedTs);
         existing.name = nonEmpty(existing.name, incoming.name);
         existing.avatarUrl = nonEmpty(existing.avatarUrl, incoming.avatarUrl);
         existing.description = nonEmpty(existing.description, incoming.description);
@@ -1825,165 +1985,6 @@ public final class NostrSyncManager {
                     null,
                     null
             );
-        }
-    }
-
-    private static final class SubscriptionRecord {
-        final int serviceId;
-        final String url;
-        String name;
-        String avatarUrl;
-        Long subscriberCount;
-        String description;
-        final Map<String, GroupRecord> groups = new HashMap<>();
-
-        SubscriptionRecord(final int serviceId,
-                           @NonNull final String url,
-                           @Nullable final String name,
-                           @Nullable final String avatarUrl,
-                           @Nullable final Long subscriberCount,
-                           @Nullable final String description) {
-            this.serviceId = serviceId;
-            this.url = url;
-            this.name = name;
-            this.avatarUrl = avatarUrl;
-            this.subscriberCount = subscriberCount;
-            this.description = description;
-        }
-
-        @Nullable
-        static SubscriptionRecord fromJson(@NonNull final JSONObject json) {
-            final int serviceId = json.optInt("service_id", Integer.MIN_VALUE);
-            final String url = json.optString("url", null);
-            if (serviceId == Integer.MIN_VALUE || TextUtils.isEmpty(url)) {
-                return null;
-            }
-            return new SubscriptionRecord(
-                    serviceId,
-                    url,
-                    json.optString("name", null),
-                    json.optString("avatar_url", null),
-                    json.has("subscriber_count")
-                            ? json.optLong("subscriber_count")
-                            : null,
-                    json.optString("description", null)
-            ).applyGroups(json.optJSONArray("groups"));
-        }
-
-        @NonNull
-        static SubscriptionRecord fromEntity(@NonNull final SubscriptionEntity entity) {
-            return new SubscriptionRecord(
-                    entity.getServiceId(),
-                    entity.getUrl(),
-                    entity.getName(),
-                    entity.getAvatarUrl(),
-                    entity.getSubscriberCount(),
-                    entity.getDescription()
-            );
-        }
-
-        @NonNull
-        JSONObject toJson() throws JSONException {
-            final JSONObject json = new JSONObject()
-                    .put("service_id", serviceId)
-                    .put("url", url)
-                    .put("name", name)
-                    .put("avatar_url", avatarUrl)
-                    .put("description", description);
-            if (subscriberCount != null) {
-                json.put("subscriber_count", subscriberCount);
-            }
-            if (!groups.isEmpty()) {
-                final List<GroupRecord> sortedGroups = new ArrayList<>(groups.values());
-                sortedGroups.sort((left, right) ->
-                        left.name.compareToIgnoreCase(right.name));
-                final JSONArray groupsArray = new JSONArray();
-                for (final GroupRecord group : sortedGroups) {
-                    groupsArray.put(group.toJson());
-                }
-                json.put("groups", groupsArray);
-            }
-            return json;
-        }
-
-        @NonNull
-        SubscriptionEntity toEntity() {
-            return new SubscriptionEntity(
-                    0,
-                    serviceId,
-                    url,
-                    name,
-                    avatarUrl,
-                    subscriberCount,
-                    description,
-                    NotificationMode.DISABLED
-            );
-        }
-
-        boolean applyTo(@NonNull final SubscriptionEntity target) {
-            boolean changed = false;
-            if (!TextUtils.equals(target.getName(), name) && !TextUtils.isEmpty(name)) {
-                target.setName(name);
-                changed = true;
-            }
-            if (!TextUtils.equals(target.getAvatarUrl(), avatarUrl)
-                    && !TextUtils.isEmpty(avatarUrl)) {
-                target.setAvatarUrl(avatarUrl);
-                changed = true;
-            }
-            if (!TextUtils.equals(target.getDescription(), description)
-                    && !TextUtils.isEmpty(description)) {
-                target.setDescription(description);
-                changed = true;
-            }
-            if (subscriberCount != null
-                    && (target.getSubscriberCount() == null
-                    || target.getSubscriberCount() < subscriberCount)) {
-                target.setSubscriberCount(subscriberCount);
-                changed = true;
-            }
-            return changed;
-        }
-
-        @NonNull
-        private SubscriptionRecord applyGroups(@Nullable final JSONArray groupsArray) {
-            if (groupsArray == null) {
-                return this;
-            }
-            for (int i = 0; i < groupsArray.length(); i++) {
-                final JSONObject groupJson = groupsArray.optJSONObject(i);
-                if (groupJson != null) {
-                    mergeGroup(GroupRecord.fromJson(groupJson));
-                } else {
-                    final String groupName = groupsArray.optString(i, null);
-                    if (!TextUtils.isEmpty(groupName)) {
-                        mergeGroup(new GroupRecord(groupName, FeedGroupIcon.ALL.getId()));
-                    }
-                }
-            }
-            return this;
-        }
-
-        void mergeGroupsFrom(@NonNull final SubscriptionRecord incoming) {
-            for (final GroupRecord group : incoming.groups.values()) {
-                mergeGroup(group);
-            }
-        }
-
-        void mergeGroup(@Nullable final GroupRecord group) {
-            if (group == null || TextUtils.isEmpty(group.name)) {
-                return;
-            }
-
-            final GroupRecord existing = groups.get(group.name);
-            if (existing == null) {
-                groups.put(group.name, new GroupRecord(group.name, group.iconId));
-                return;
-            }
-            if (existing.iconId == FeedGroupIcon.ALL.getId()
-                    && group.iconId != FeedGroupIcon.ALL.getId()) {
-                existing.iconId = group.iconId;
-            }
         }
     }
 
