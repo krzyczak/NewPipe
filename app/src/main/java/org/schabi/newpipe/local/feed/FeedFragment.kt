@@ -103,6 +103,7 @@ class FeedFragment : BaseStateFragment<FeedState>() {
 
     private lateinit var groupAdapter: GroupieAdapter
 
+    private var defaultSharedPreferences: SharedPreferences? = null
     private var onSettingsChangeListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var updateListViewModeOnResume = false
     private var isRefreshing = false
@@ -120,13 +121,17 @@ class FeedFragment : BaseStateFragment<FeedState>() {
             ?: FeedGroupEntity.GROUP_ALL_ID
         groupName = arguments?.getString(KEY_GROUP_NAME) ?: ""
 
+        val listViewModeKey = getString(R.string.list_view_mode_key)
         onSettingsChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (getString(R.string.list_view_mode_key).equals(key)) {
+            if (key == listViewModeKey) {
                 updateListViewModeOnResume = true
             }
         }
-        PreferenceManager.getDefaultSharedPreferences(activity)
-            .registerOnSharedPreferenceChangeListener(onSettingsChangeListener)
+        defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(
+            requireContext().applicationContext
+        ).also {
+            it.registerOnSharedPreferenceChangeListener(onSettingsChangeListener)
+        }
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
@@ -286,11 +291,9 @@ class FeedFragment : BaseStateFragment<FeedState>() {
 
     override fun onDestroy() {
         disposables.dispose()
-        if (onSettingsChangeListener != null) {
-            PreferenceManager.getDefaultSharedPreferences(activity)
-                .unregisterOnSharedPreferenceChangeListener(onSettingsChangeListener)
-            onSettingsChangeListener = null
-        }
+        defaultSharedPreferences?.unregisterOnSharedPreferenceChangeListener(onSettingsChangeListener)
+        defaultSharedPreferences = null
+        onSettingsChangeListener = null
 
         super.onDestroy()
 
