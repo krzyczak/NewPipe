@@ -1,0 +1,53 @@
+name: Rebase feat/nostr-sync on TeamNewPipe refactor
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebase-feat-nostr-sync
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/nostr-sync
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch TeamNewPipe refactor branch
+        run: |
+          git remote add teamnewpipe https://github.com/TeamNewPipe/NewPipe.git
+          git fetch --no-tags teamnewpipe refactor
+
+      - name: Rebase when TeamNewPipe/refactor is ahead
+        run: |
+          set -euo pipefail
+
+          NEW_COMMITS="$(git rev-list --count HEAD..teamnewpipe/refactor)"
+
+          if [ "$NEW_COMMITS" -eq 0 ]; then
+            echo "There is nothing to do."
+            echo "There is nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Found $NEW_COMMITS new commit(s) on TeamNewPipe/refactor."
+          git rebase teamnewpipe/refactor
+          git push --force-with-lease origin HEAD:feat/nostr-sync
+
+          {
+            echo "Rebased \`feat/nostr-sync\` onto \`TeamNewPipe/refactor\`."
+            echo "New commits detected: $NEW_COMMITS"
+          } >> "$GITHUB_STEP_SUMMARY"
