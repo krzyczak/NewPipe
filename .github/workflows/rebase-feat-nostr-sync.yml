@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: rebase-feat-nostr-sync
@@ -28,10 +29,22 @@ jobs:
 
       - name: Fetch TeamNewPipe refactor branch
         run: |
-          git remote add teamnewpipe https://github.com/TeamNewPipe/NewPipe.git
+          if git remote get-url teamnewpipe >/dev/null 2>&1; then
+            git remote set-url teamnewpipe https://github.com/TeamNewPipe/NewPipe.git
+          else
+            git remote add teamnewpipe https://github.com/TeamNewPipe/NewPipe.git
+          fi
           git fetch --no-tags teamnewpipe refactor
 
+      - name: Sync fork refactor branch with TeamNewPipe/refactor
+        run: |
+          set -euo pipefail
+          git push --force origin teamnewpipe/refactor:refs/heads/refactor
+          echo "Synced origin/refactor to TeamNewPipe/refactor." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Rebase when TeamNewPipe/refactor is ahead
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -44,10 +57,63 @@ jobs:
           fi
 
           echo "Found $NEW_COMMITS new commit(s) on TeamNewPipe/refactor."
-          git rebase teamnewpipe/refactor
-          git push --force-with-lease origin HEAD:feat/nostr-sync
+
+          if git rebase teamnewpipe/refactor; then
+            git push --force-with-lease origin HEAD:feat/nostr-sync
+            {
+              echo "Rebased \`feat/nostr-sync\` onto \`TeamNewPipe/refactor\`."
+              echo "New commits detected: $NEW_COMMITS"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git rebase --abort || true
+          echo "Rebase conflict detected. Opening or updating PR for conflict resolution."
+
+          PR_NUMBER="$(gh pr list \
+            --base refactor \
+            --head feat/nostr-sync \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --base refactor \
+              --head feat/nostr-sync \
+              --title "Rebase conflict: feat/nostr-sync onto refactor" \
+              --body "$(cat <<'EOF'
+Automated nightly rebase detected conflicts while rebasing `feat/nostr-sync` onto `TeamNewPipe/refactor`.
+
+`refactor` in this fork is kept synced to `TeamNewPipe/refactor` by workflow automation.
+EOF
+)"
+            PR_NUMBER="$(gh pr list \
+              --base refactor \
+              --head feat/nostr-sync \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty')"
+          fi
+
+          HAS_MARKER_COMMENT="$(gh pr view "$PR_NUMBER" --json comments --jq '[.comments[] | select(.body | contains("<!-- rebase-conflict-bot -->"))] | length')"
+
+          if [ "$HAS_MARKER_COMMENT" -eq 0 ]; then
+            gh pr comment "$PR_NUMBER" --body "$(cat <<'EOF'
+<!-- rebase-conflict-bot -->
+@copilot Please resolve the current merge conflicts so `feat/nostr-sync` can be rebased cleanly onto `refactor` (which mirrors `TeamNewPipe/refactor`).
+Preserve existing `feat/nostr-sync` functionality and keep the project buildable.
+EOF
+)"
+          fi
 
           {
-            echo "Rebased \`feat/nostr-sync\` onto \`TeamNewPipe/refactor\`."
+            echo "Rebase conflict detected while rebasing \`feat/nostr-sync\` onto \`TeamNewPipe/refactor\`."
             echo "New commits detected: $NEW_COMMITS"
+            echo "Opened or updated PR #$PR_NUMBER (\`feat/nostr-sync\` -> \`refactor\`)."
+            if [ "$HAS_MARKER_COMMENT" -eq 0 ]; then
+              echo "Posted an \`@copilot\` request on the PR."
+            else
+              echo "An \`@copilot\` request comment already exists on the PR."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
