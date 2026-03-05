@@ -1508,6 +1508,10 @@ class VideoDetailFragment :
             updateOverlayData(info.name, info.uploaderName, info.thumbnails)
         }
 
+        val hasAudioStreams = info.videoStreams.isNotEmpty() || info.audioStreams.isNotEmpty()
+        val hasVideoStreams = info.videoStreams.isNotEmpty() || info.videoOnlyStreams.isNotEmpty()
+        val hasPlayableStreams = hasAudioStreams || hasVideoStreams
+
         if (!info.errors.isEmpty()) {
             // Bandcamp fan pages are not yet supported and thus a ContentNotAvailableException is
             // thrown. This is not an error and thus should not be shown to the user.
@@ -1515,7 +1519,7 @@ class VideoDetailFragment :
                 it is ContentNotSupportedException && "Fan pages are not supported" == it.message
             }
 
-            if (!info.errors.isEmpty()) {
+            if (!info.errors.isEmpty() && !hasPlayableStreams) {
                 showSnackBarError(
                     ErrorInfo(info.errors, UserAction.REQUESTED_STREAM, "Some info not extracted: " + info.url, info)
                 )
@@ -1523,11 +1527,7 @@ class VideoDetailFragment :
         }
 
         binding.detailControlsDownload.isVisible = !StreamTypeUtil.isLiveStream(info.streamType)
-
-        val hasAudioStreams = info.videoStreams.isNotEmpty() || info.audioStreams.isNotEmpty()
         binding.detailControlsBackground.isVisible = hasAudioStreams
-
-        val hasVideoStreams = info.videoStreams.isNotEmpty() || info.videoOnlyStreams.isNotEmpty()
         binding.detailControlsPopup.isVisible = hasVideoStreams
         binding.detailThumbnailPlayButton.setImageResource(
             if (hasVideoStreams) R.drawable.ic_play_arrow_shadow else R.drawable.ic_headset_shadow
